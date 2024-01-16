@@ -15,13 +15,13 @@
 #
 
 AC_PREREQ([2.69])
-AC_INIT([attr], [2.5.1], [acl-devel@nongnu.org])
+AC_INIT([attr], [2.5.2], [acl-devel@nongnu.org])
 AC_CONFIG_AUX_DIR([build-aux])
 AC_CONFIG_MACRO_DIR([m4])
 AC_CONFIG_HEADERS([include/config.h])
 AC_PREFIX_DEFAULT(/usr)
 
-AM_INIT_AUTOMAKE([-Wall foreign 1.13 dist-xz subdir-objects])
+AM_INIT_AUTOMAKE([-Wall foreign 1.15 dist-xz subdir-objects])
 AM_SILENT_RULES([yes])
 
 AC_CANONICAL_HOST
