@@ -27,10 +27,6 @@
 #include <string.h>
 #include <errno.h>
 
-#if defined(HAVE_ALLOCA_H)
-# include <alloca.h>
-#endif
-
 #if defined(HAVE_ATTR_LIBATTR_H)
 # include "attr/libattr.h"
 #endif
@@ -41,14 +37,6 @@
 
 #if !defined(ENOTSUP)
 # define ENOTSUP (-1)
-#endif
-
-#if defined(HAVE_ALLOCA)
-# define my_alloc(size) alloca (size)
-# define my_free(ptr) do { } while(0)
-#else
-# define my_alloc(size) malloc (size)
-# define my_free(ptr) free (ptr)
 #endif
 
 /* Copy extended attributes from src_path to dst_path. If the file
@@ -63,16 +51,36 @@ attr_copy_file(const char *src_path, const char *dst_path,
 {
 #if defined(HAVE_LISTXATTR) && defined(HAVE_GETXATTR) && defined(HAVE_SETXATTR)
 	int ret = 0;
-	ssize_t size;
-	char *names = NULL, *end_names, *name, *value = NULL;
-	unsigned int setxattr_ENOTSUP = 0;
+	ssize_t nsize;
+	char namesbuf[512];
+	char valuebuf[512];
+	char *names = namesbuf, *name;
+	char *value = valuebuf;
+	size_t namesalloc = sizeof namesbuf;
+	size_t valuealloc = sizeof valuebuf;
+	int setxattr_ENOTSUP = 0;
 
 	/* ignore acls by default */
 	if (check == NULL)
 		check = attr_copy_check_permissions;
 
-	size = llistxattr (src_path, NULL, 0);
-	if (size < 0) {
+	for (;;) {
+		size_t more = 2 * namesalloc;
+		nsize = llistxattr (src_path, names, namesalloc - 1);
+		if (nsize >= 0 || errno != ERANGE)
+			break;
+		if (names != namesbuf)
+			free (names);
+		names = namesalloc < more ? malloc (more) : NULL;
+		if (names == NULL) {
+			error (ctx, "");
+			ret = -1;
+			goto getout;
+		}
+		namesalloc = more;
+	}
+
+	if (nsize < 0) {
 		if (errno != ENOSYS && errno != ENOTSUP) {
 			const char *qpath = quote (ctx, src_path);
 			error (ctx, _("listing attributes of %s"), qpath);
@@ -81,33 +89,41 @@ attr_copy_file(const char *src_path, const char *dst_path,
 		}
 		goto getout;
 	}
-	names = (char *) my_alloc (size+1);
-	if (names == NULL) {
-		error (ctx, "");
-		ret = -1;
-		goto getout;
-	}
-	size = llistxattr (src_path, names, size);
-	if (size < 0) {
-		const char *qpath = quote (ctx, src_path);
-		error (ctx, _("listing attributes of %s"), qpath);
-		quote_free (ctx, qpath);
-		ret = -1;
-		goto getout;
-	} else {
-		names[size] = '\0';
-		end_names = names + size;
-	}
 
-	for (name = names; name != end_names; name = strchr(name, '\0') + 1) {
-		void *old_value;
+	/* Append an empty name to defend against a hypothetical syscall bug
+	   that yields a buffer ending in non-'\0'.  */
+	names[nsize++] = '\0';
+
+	for (name = names; name < names + nsize; name += strlen (name) + 1) {
+		char *value;
+		ssize_t vsize;
+
+		/* Defend against empty name from the above workaround, or from
+		   a hypothetical syscall bug that yields an empty name.  */
+		if (!*name)
+			continue;
 
 		/* check if this attribute shall be preserved */
-		if (!*name || !check(name, ctx))
+		if (!check (name, ctx))
 			continue;
 
-		size = lgetxattr (src_path, name, NULL, 0);
-		if (size < 0) {
+		for (;;) {
+			size_t more = 2 * valuealloc;
+
+			vsize = lgetxattr (src_path, name, value, valuealloc);
+			if (vsize >= 0 || errno != ERANGE)
+				break;
+			if (value != valuebuf)
+				free (value);
+			value = valuealloc < more ? malloc (more) : NULL;
+			if (value == NULL) {
+				error (ctx, "");
+				ret = -1;
+				goto getout;
+			}
+			valuealloc = more;
+		}
+		if (vsize < 0) {
 			const char *qpath = quote (ctx, src_path);
 			const char *qname = quote (ctx, name);
 			error (ctx, _("getting attribute %s of %s"),
@@ -117,26 +133,9 @@ attr_copy_file(const char *src_path, const char *dst_path,
 			ret = -1;
 			continue;
 		}
-		value = (char *) realloc (old_value = value, size);
-		if (size != 0 && value == NULL) {
-			free(old_value);
-			error (ctx, "");
-			ret = -1;
-		}
-		size = lgetxattr (src_path, name, value, size);
-		if (size < 0) {
-			const char *qpath = quote (ctx, src_path);
-			const char *qname = quote (ctx, name);
-			error (ctx, _("getting attribute %s of %s"),
-			       qname, qpath);
-			quote_free (ctx, qname);
-			quote_free (ctx, qpath);
-			ret = -1;
-			continue;
-		}
-		if (lsetxattr (dst_path, name, value, size, 0) != 0) {
+		if (lsetxattr (dst_path, name, value, vsize, 0) != 0) {
 			if (errno == ENOTSUP)
-				setxattr_ENOTSUP++;
+				setxattr_ENOTSUP = 1;
 			else {
 				const char *qpath = quote (ctx, dst_path);
 				if (errno == ENOSYS) {
@@ -163,12 +162,13 @@ attr_copy_file(const char *src_path, const char *dst_path,
 		ret = -1;
 		quote_free (ctx, qpath);
 	}
+	if (value != valuebuf)
+		free (value);
 getout:
-	free (value);
-	my_free (names);
+	if (names != namesbuf)
+		free (names);
 	return ret;
 #else
 	return 0;
 #endif
 }
-
